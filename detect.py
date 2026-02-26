@@ -49,7 +49,7 @@ def remove_prefix(state_dict, prefix):
 
 def load_model(model, pretrained_path, load_to_cpu):
     print('Loading pretrained model from {}'.format(pretrained_path))
-    if load_to_cpu:
+    if load_to_cpu or not torch.cuda.is_available():
         pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
     else:
         device = torch.cuda.current_device()
@@ -72,6 +72,10 @@ if __name__ == '__main__':
         cfg = cfg_re50
     # net and model
     net = RetinaFace(cfg=cfg, phase = 'test')
+    if not args.cpu and not torch.cuda.is_available():
+        print('CUDA is not available, automatically switching to CPU inference.')
+        args.cpu = True
+
     net = load_model(net, args.trained_model, args.cpu)
     net.eval()
     print('Finished loading model!')
@@ -165,4 +169,3 @@ if __name__ == '__main__':
 
             name = "test.jpg"
             cv2.imwrite(name, img_raw)
-
