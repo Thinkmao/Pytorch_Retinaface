@@ -1,8 +1,71 @@
 import cv2
 import numpy as np
 import random
+
+import os
+os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+
+import albumentations as A
 from utils.box_utils import matrix_iof
 
+imgaug_operation = A.Compose([
+    # 1) 大概率灰度化，模拟IR单色成像
+    A.OneOf([
+        A.ToGray(num_output_channels=3),
+    ], p=0.7),
+
+    # 2) 亮度 / 对比度 / 动态范围扰动
+    A.OneOf([
+        A.RandomBrightnessContrast(
+            brightness_limit=0.2,
+            contrast_limit=0.25
+        ),
+        A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8)),
+        A.RandomGamma(gamma_limit=(80, 120)),
+    ], p=0.6),
+
+    # 3) 噪声
+    A.OneOf([
+        A.GaussNoise(var_limit=(10.0, 50.0), mean=0, per_channel=False),
+        A.MultiplicativeNoise(multiplier=(0.9, 1.1), per_channel=False),
+        A.ImageCompression(quality_lower=30, quality_upper=70),
+    ], p=0.45),
+
+    # 4) 模糊 / 失焦 / 运动
+    A.OneOf([
+        A.MotionBlur(blur_limit=7),
+        A.GaussianBlur(blur_limit=(3, 5)),
+        A.MedianBlur(blur_limit=3),
+    ], p=0.35),
+
+    # 5) 遮挡增强
+    A.CoarseDropout(
+        min_holes=1,
+        max_holes=4,
+        min_height=0.03,
+        max_height=0.12,
+        min_width=0.03,
+        max_width=0.12,
+        fill_value=0,
+        p=0.25
+    ),
+
+], p=1.0)
+
+# imgaug_operation = A.Compose([
+#     A.OneOf([
+#         A.GaussNoise(),  # 将高斯噪声应用于输入图像。
+#         A.MultiplicativeNoise()
+#     ], p=0.5),  # 应用选定变换的概率
+#     A.OneOf([
+#         A.MotionBlur(p=0.2),  # 使用随机大小的内核将运动模糊应用于输入图像。
+#         A.MedianBlur(blur_limit=3, p=0.1),  # 中值滤波
+#         A.Blur(blur_limit=3, p=0.1),  # 使用随机大小的内核模糊输入图像。
+#         A.GaussianBlur()
+#     ], p=0.5),
+#     A.ToGray(num_output_channels=3, p=0.3),  # 灰度增强
+#     # A.RandomBrightnessContrast(p=0.5),  # 随机明亮对比度
+# ])
 
 def _crop(image, boxes, labels, landm, img_dim):
     height, width, _ = image.shape
@@ -213,13 +276,18 @@ class preproc(object):
         self.rgb_means = rgb_means
 
     def __call__(self, image, targets):
-        assert targets.shape[0] > 0, "this image does not have gt"
+        if targets.shape[0] == 0:
+            image_t = _distort(image)
+            image_t = _pad_to_square(image_t, self.rgb_means, True)
+            image_t = _resize_subtract_mean(image_t, self.img_dim, self.rgb_means)
+            return image_t, targets
 
         boxes = targets[:, :4].copy()
         labels = targets[:, -1].copy()
         landm = targets[:, 4:-1].copy()
 
         image_t, boxes_t, labels_t, landm_t, pad_image_flag = _crop(image, boxes, labels, landm, self.img_dim)
+        image_t = imgaug_operation(image=image_t)["image"]
         image_t = _distort(image_t)
         image_t = _pad_to_square(image_t,self.rgb_means, pad_image_flag)
         image_t, boxes_t, landm_t = _mirror(image_t, boxes_t, landm_t)

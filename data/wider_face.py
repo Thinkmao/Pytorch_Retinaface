@@ -39,12 +39,10 @@ class WiderFaceDetection(data.Dataset):
 
     def __getitem__(self, index):
         img = cv2.imread(self.imgs_path[index])
-        height, width, _ = img.shape
 
         labels = self.words[index]
         annotations = np.zeros((0, 15))
-        if len(labels) == 0:
-            return annotations
+
         for idx, label in enumerate(labels):
             annotation = np.zeros((1, 15))
             # bbox
@@ -73,6 +71,8 @@ class WiderFaceDetection(data.Dataset):
         target = np.array(annotations)
         if self.preproc is not None:
             img, target = self.preproc(img, target)
+        else:
+            img = img.astype(np.float32).transpose(2, 0, 1)
 
         return torch.from_numpy(img), target
 

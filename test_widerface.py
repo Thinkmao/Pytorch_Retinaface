@@ -14,11 +14,13 @@ from utils.timer import Timer
 
 
 parser = argparse.ArgumentParser(description='Retinaface')
-parser.add_argument('-m', '--trained_model', default='./weights/Resnet50_Final.pth',
+parser.add_argument('-m', '--trained_model', default='./weights/weights_with_hn05/mobilenet0.25_Final.pth',
                     type=str, help='Trained state_dict file path to open')
-parser.add_argument('--network', default='resnet50', help='Backbone network mobile0.25 or resnet50')
-parser.add_argument('--origin_size', default=True, type=str, help='Whether use origin image size to evaluate')
-parser.add_argument('--save_folder', default='./widerface_evaluate/widerface_txt/', type=str, help='Dir to save txt results')
+parser.add_argument('--network', default='mobile0.25', help='Backbone network mobile0.25 or resnet50')
+parser.add_argument('--origin_size', default=False, type=bool, help='Whether use origin image size to evaluate')
+parser.add_argument('--target_size', default=320, type=int, help='short side for resize')
+parser.add_argument('--max_size', default=320, type=int, help='long side upper bound')
+parser.add_argument('--save_folder', default='./widerface_evaluate/txtfiles/widerface_hn5_320_1_txt/', type=str, help='Dir to save txt results')
 parser.add_argument('--cpu', action="store_true", default=False, help='Use cpu inference')
 parser.add_argument('--dataset_folder', default='./data/widerface/val/images/', type=str, help='dataset path')
 parser.add_argument('--confidence_threshold', default=0.02, type=float, help='confidence_threshold')
@@ -101,8 +103,8 @@ if __name__ == '__main__':
         img = np.float32(img_raw)
 
         # testing scale
-        target_size = 1600
-        max_size = 2150
+        target_size = args.target_size
+        max_size = args.max_size
         im_shape = img.shape
         im_size_min = np.min(im_shape[0:2])
         im_size_max = np.max(im_shape[0:2])

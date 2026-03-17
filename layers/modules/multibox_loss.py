@@ -64,6 +64,11 @@ class MultiBoxLoss(nn.Module):
         landm_t = torch.Tensor(num, num_priors, 10)
         conf_t = torch.LongTensor(num, num_priors)
         for idx in range(num):
+            if targets[idx].numel() == 0:
+                loc_t[idx] = 0
+                conf_t[idx] = 0
+                landm_t[idx] = 0
+                continue
             truths = targets[idx][:, :4].data
             labels = targets[idx][:, -1].data
             landms = targets[idx][:, 4:14].data
