@@ -33,9 +33,17 @@ class WiderFaceDetection(data.Dataset):
                 labels.append(label)
 
         self.words.append(labels)
+        self.empty_indices = [idx for idx, item in enumerate(self.words) if len(item) == 0]
+        self.non_empty_indices = [idx for idx, item in enumerate(self.words) if len(item) > 0]
 
     def __len__(self):
         return len(self.imgs_path)
+
+    def get_empty_label_indices(self):
+        return self.empty_indices
+
+    def get_non_empty_label_indices(self):
+        return self.non_empty_indices
 
     def __getitem__(self, index):
         img = cv2.imread(self.imgs_path[index])

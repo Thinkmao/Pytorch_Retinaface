@@ -6,6 +6,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import argparse
 import torch.utils.data as data
+from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
 from data import WiderFaceDetection, detection_collate, preproc, cfg_mnet, cfg_re50
 from layers.modules import MultiBoxLoss
@@ -32,8 +33,97 @@ parser.add_argument('--dist_url', default='env://', type=str, help='URL used to 
 parser.add_argument('--rank', default=0, type=int, help='Node rank for distributed training')
 parser.add_argument('--world_size', default=1, type=int, help='Number of processes for distributed training')
 parser.add_argument('--local_rank', default=-1, type=int, help='Local rank for distributed training')
+parser.add_argument('--empty_label_ratio', default=0.0, type=float,
+                    help='Ratio of empty-label samples in each batch, range [0, 1). 0 means disabled.')
 
 args = parser.parse_args()
+
+
+class BalancedEmptyLabelBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size, empty_label_ratio=0.0, drop_last=False,
+                 distributed=False, num_replicas=1, rank=0):
+        if batch_size <= 0:
+            raise ValueError('batch_size must be positive')
+        if empty_label_ratio < 0 or empty_label_ratio >= 1:
+            raise ValueError('empty_label_ratio must be in [0, 1).')
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.empty_label_ratio = empty_label_ratio
+        self.drop_last = drop_last
+        self.distributed = distributed
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+
+        self.empty_per_batch = min(batch_size - 1, int(round(batch_size * empty_label_ratio)))
+        self.non_empty_per_batch = batch_size - self.empty_per_batch
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def _split_for_rank(self, indices):
+        if not self.distributed:
+            return indices
+        return indices[self.rank::self.num_replicas]
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.epoch + 17)
+
+        empty_indices = list(self.dataset.get_empty_label_indices())
+        non_empty_indices = list(self.dataset.get_non_empty_label_indices())
+
+        if len(non_empty_indices) == 0:
+            raise RuntimeError('Dataset has no non-empty labels, cannot build mixed batches.')
+
+        if len(empty_indices) == 0 or self.empty_per_batch == 0:
+            all_indices = non_empty_indices + empty_indices
+            perm = torch.randperm(len(all_indices), generator=generator).tolist()
+            all_indices = [all_indices[i] for i in perm]
+            all_indices = self._split_for_rank(all_indices)
+            for i in range(0, len(all_indices), self.batch_size):
+                batch = all_indices[i:i + self.batch_size]
+                if len(batch) == self.batch_size or (len(batch) > 0 and not self.drop_last):
+                    yield batch
+            return
+
+        empty_perm = torch.randperm(len(empty_indices), generator=generator).tolist()
+        non_empty_perm = torch.randperm(len(non_empty_indices), generator=generator).tolist()
+        empty_pool = [empty_indices[i] for i in empty_perm]
+        non_empty_pool = [non_empty_indices[i] for i in non_empty_perm]
+
+        empty_pool = self._split_for_rank(empty_pool)
+        non_empty_pool = self._split_for_rank(non_empty_pool)
+
+        empty_ptr = 0
+        non_empty_ptr = 0
+        while non_empty_ptr < len(non_empty_pool):
+            next_non_empty = non_empty_pool[non_empty_ptr:non_empty_ptr + self.non_empty_per_batch]
+            non_empty_ptr += self.non_empty_per_batch
+            if len(next_non_empty) < self.non_empty_per_batch and self.drop_last:
+                break
+
+            batch = list(next_non_empty)
+            target_empty = self.batch_size - len(batch)
+            if len(empty_pool) > 0 and target_empty > 0:
+                for _ in range(target_empty):
+                    batch.append(empty_pool[empty_ptr])
+                    empty_ptr = (empty_ptr + 1) % len(empty_pool)
+
+            if len(batch) == self.batch_size or (len(batch) > 0 and not self.drop_last):
+                batch_perm = torch.randperm(len(batch), generator=generator).tolist()
+                batch = [batch[i] for i in batch_perm]
+                yield batch
+
+    def __len__(self):
+        non_empty_indices = list(self.dataset.get_non_empty_label_indices())
+        if self.distributed:
+            non_empty_indices = self._split_for_rank(non_empty_indices)
+        if self.drop_last:
+            return len(non_empty_indices) // self.non_empty_per_batch
+        return math.ceil(len(non_empty_indices) / self.non_empty_per_batch)
+
 
 def init_distributed_mode(opt):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -64,13 +154,29 @@ def train():
 
     dataset = WiderFaceDetection(training_dataset,preproc(img_dim, rgb_mean))
 
-    train_sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
+    train_sampler = None
+    batch_sampler = None
+    if args.empty_label_ratio > 0:
+        batch_sampler = BalancedEmptyLabelBatchSampler(
+            dataset,
+            batch_size=batch_size,
+            empty_label_ratio=args.empty_label_ratio,
+            drop_last=False,
+            distributed=is_distributed,
+            num_replicas=dist.get_world_size() if is_distributed else 1,
+            rank=args.rank if is_distributed else 0,
+        )
+        print('Using BalancedEmptyLabelBatchSampler, empty_label_ratio={:.2f}'.format(args.empty_label_ratio))
+    else:
+        train_sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
+
     dataloader = data.DataLoader(
         dataset,
-        batch_size,
-        shuffle=(train_sampler is None),
+        batch_size=batch_size if batch_sampler is None else 1,
+        shuffle=(train_sampler is None and batch_sampler is None),
         num_workers=num_workers,
         sampler=train_sampler,
+        batch_sampler=batch_sampler,
         collate_fn=detection_collate,
         pin_memory=True,
         persistent_workers=True,
@@ -95,6 +201,8 @@ def train():
         if iteration % epoch_size == 0:
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
+            if batch_sampler is not None and hasattr(batch_sampler, 'set_epoch'):
+                batch_sampler.set_epoch(epoch)
 
             # create batch iterator
             batch_iterator = iter(dataloader)
