@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Directory to save original images that contain detected faces.",
     )
+    parser.add_argument(
+        "--ir_gray",
+        action="store_true",
+        default=False,
+        help="Convert each input image to IR-style grayscale before detection and output.",
+    )
     return parser.parse_args()
 
 
@@ -224,6 +230,14 @@ def detect_faces(
     return dets
 
 
+def convert_to_ir_gray(img_bgr: np.ndarray) -> np.ndarray:
+    """Approximate IR camera style grayscale and keep 3 channels for RetinaFace input."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
 def to_label_line(box: Sequence[float], image_w: int, image_h: int) -> str:
     x1, y1, x2, y2 = box[:4]
     x1 = int(np.clip(np.floor(x1), 0, image_w - 1))
@@ -260,11 +274,13 @@ def run_mining(
             if args.max_samples > 0 and seen_count > args.max_samples:
                 break
 
+            img_for_pipeline = convert_to_ir_gray(img_raw) if args.ir_gray else img_raw
+
             dets = detect_faces(
                 net=net,
                 cfg=cfg,
                 device=device,
-                img_raw=img_raw,
+                img_raw=img_for_pipeline,
                 input_size=input_size,
                 confidence_threshold=args.confidence_threshold,
                 nms_threshold=args.nms_threshold,
@@ -276,7 +292,7 @@ def run_mining(
             if dets.size == 0:
                 continue
 
-            h, w = img_raw.shape[:2]
+            h, w = img_for_pipeline.shape[:2]
             fw.write(f"#{rel_name}\n")
             fw.write(f"{len(dets)}\n")
             for b in dets:
@@ -284,7 +300,7 @@ def run_mining(
 
             dst_path = out_img_dir / rel_name
             dst_path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(dst_path), img_raw)
+            cv2.imwrite(str(dst_path), img_for_pipeline)
             valid_count += 1
             total_faces += len(dets)
 
