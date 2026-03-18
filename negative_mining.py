@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import datasets
 
 from data import cfg_mnet, cfg_re50
 from layers.functions.prior_box import PriorBox
@@ -26,24 +27,27 @@ def parse_args() -> argparse.Namespace:
             "  --hf_dataset_id username/PASS --hf_split train --hf_streaming\n"
         ),
     )
-    parser.add_argument("--trained_model", required=True, type=str, help="Path to RetinaFace weights.")
-    parser.add_argument("--network", default="resnet50", choices=["mobile0.25", "resnet50"], help="Backbone type.")
+    parser.add_argument("--trained_model", default='./weights/mobilenet0.25_Final.pth', type=str,
+                        help="Path to RetinaFace weights.")
+    parser.add_argument("--network", default="mobile0.25", choices=["mobile0.25", "resnet50"], help="Backbone type.")
     parser.add_argument("--cpu", action="store_true", default=False, help="Force CPU inference.")
 
     parser.add_argument("--confidence_threshold", default=0.3, type=float, help="Confidence filter before NMS.")
     parser.add_argument("--nms_threshold", default=0.4, type=float, help="NMS IoU threshold.")
     parser.add_argument("--top_k", default=5000, type=int, help="Keep top-k before NMS.")
     parser.add_argument("--keep_top_k", default=750, type=int, help="Keep top-k after NMS.")
-    parser.add_argument("--vis_thres", default=0.6, type=float, help="Final score threshold for label export.")
+    parser.add_argument("--vis_thres", default=0.4, type=float, help="Final score threshold for label export.")
 
     parser.add_argument(
         "--input_size",
-        default="",
+        default="320x320",
         type=str,
         help="Optional inference input size, e.g. 320x320. Empty means using original image size.",
     )
 
-    parser.add_argument("--hf_dataset_id", required=True, type=str, help="Hugging Face dataset id, e.g. org/pass.")
+    parser.add_argument("--input_dir", default="E:/wan/DataSet/PASS/PASS_dataset", type=str, help="Local image directory.")
+    parser.add_argument("--hf_dataset_id", default='yukimasano/pass', type=str,
+                        help="Hugging Face dataset id, e.g. org/pass.")
     parser.add_argument("--hf_config", default=None, type=str, help="Optional Hugging Face dataset config/subset name.")
     parser.add_argument("--hf_split", default="train", type=str, help="Hugging Face split name.")
     parser.add_argument("--hf_image_column", default="image", type=str, help="Image column name in HF samples.")
@@ -58,20 +62,20 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--output_label",
-        default="./negative_mining_labels.txt",
+        default="./negative_mining/2/negative_mining_labels.txt",
         type=str,
         help="Output label file path in WIDERFace label.txt format.",
     )
     parser.add_argument(
         "--output_face_images",
-        default="./negative_mining_face_images",
+        default="./negative_mining/2",
         type=str,
         help="Directory to save original images that contain detected faces.",
     )
     parser.add_argument(
         "--ir_gray",
         action="store_true",
-        default=False,
+        default=True,
         help="Convert each input image to IR-style grayscale before detection and output.",
     )
     return parser.parse_args()
@@ -116,7 +120,8 @@ def load_model(model: torch.nn.Module, pretrained_path: str, load_to_cpu: bool) 
         pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
     else:
         device = torch.cuda.current_device()
-        pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage.cuda(device))
+        pretrained_dict = torch.load(pretrained_path, map_location=lambda storage,
+                                     loc: storage.cuda(device), weights_only=True)
 
     if "state_dict" in pretrained_dict.keys():
         pretrained_dict = remove_prefix(pretrained_dict["state_dict"], "module.")
@@ -127,6 +132,23 @@ def load_model(model: torch.nn.Module, pretrained_path: str, load_to_cpu: bool) 
     model.load_state_dict(pretrained_dict, strict=False)
     return model
 
+def iter_local_images(input_dir: str) -> Iterator[Tuple[str, np.ndarray]]:
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    root = Path(input_dir)
+
+    if not root.exists():
+        raise RuntimeError(f"Input dir does not exist: {input_dir}")
+
+    files = [p for p in root.rglob("*") if p.suffix.lower() in exts]
+    files.sort()
+
+    for p in files:
+        img = cv2.imread(str(p))
+        if img is None:
+            print(f"Warning: failed to read image: {p}")
+            continue
+        rel_name = str(p.relative_to(root)).replace("\\", "/")
+        yield rel_name, img
 
 def iter_hf_images(
     dataset_id: str,
@@ -141,7 +163,7 @@ def iter_hf_images(
     except Exception as exc:
         raise RuntimeError("Please install Hugging Face datasets first: pip install datasets") from exc
 
-    ds = load_dataset(dataset_id, name=config_name, split=split, streaming=streaming)
+    ds = load_dataset(dataset_id, name=config_name, split=split, streaming=streaming, trust_remote_code=True)
     print(f"Loaded Hugging Face dataset: {dataset_id} [{split}] (streaming={streaming})")
 
     for idx, sample in enumerate(ds):
@@ -294,9 +316,9 @@ def run_mining(
 
             h, w = img_for_pipeline.shape[:2]
             fw.write(f"#{rel_name}\n")
-            fw.write(f"{len(dets)}\n")
-            for b in dets:
-                fw.write(to_label_line(b, w, h) + "\n")
+            # fw.write(f"{len(dets)}\n")
+            # for b in dets:
+            #     fw.write(to_label_line(b, w, h) + "\n")
 
             dst_path = out_img_dir / rel_name
             dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -332,14 +354,17 @@ def main() -> None:
     net = net.to(device)
     cudnn.benchmark = True
 
-    image_iter = iter_hf_images(
-        dataset_id=args.hf_dataset_id,
-        config_name=args.hf_config,
-        split=args.hf_split,
-        image_column=args.hf_image_column,
-        path_column=args.hf_path_column,
-        streaming=args.hf_streaming,
-    )
+    if args.input_dir:
+        image_iter = iter_local_images(args.input_dir)
+    else:
+        image_iter = iter_hf_images(
+            dataset_id=args.hf_dataset_id,
+            config_name=args.hf_config,
+            split=args.hf_split,
+            image_column=args.hf_image_column,
+            path_column=args.hf_path_column,
+            streaming=args.hf_streaming,
+        )
 
     run_mining(image_iter=image_iter, net=net, cfg=cfg, device=device, args=args, input_size=input_size)
 
