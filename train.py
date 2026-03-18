@@ -2,6 +2,7 @@ from __future__ import print_function
 import os
 import torch
 import torch.optim as optim
+from torch.amp import GradScaler, autocast
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import argparse
@@ -35,6 +36,7 @@ parser.add_argument('--world_size', default=1, type=int, help='Number of process
 parser.add_argument('--local_rank', default=-1, type=int, help='Local rank for distributed training')
 parser.add_argument('--empty_label_ratio', default=0.0, type=float,
                     help='Ratio of empty-label samples in each batch, range [0, 1). 0 means disabled.')
+parser.add_argument('--amp', action='store_true', help='Enable automatic mixed precision training on CUDA.')
 
 args = parser.parse_args()
 
@@ -236,22 +238,30 @@ def train():
 
         # forward
         t1 = time.perf_counter()
-        out = net(images)
+        with autocast(device_type='cuda', enabled=amp_enabled):
+            out = net(images)
         torch.cuda.synchronize()
         forward_time = time.perf_counter() - t1
 
-        # backprop
+        # loss
         t2 = time.perf_counter()
-
-        loss_l, loss_c, loss_landm = criterion(out, priors, targets)
-        loss = cfg['loc_weight'] * loss_l + loss_c + loss_landm
+        with autocast(device_type='cuda', enabled=amp_enabled):
+            loss_l, loss_c, loss_landm = criterion(out, priors, targets)
+            loss = cfg['loc_weight'] * loss_l + loss_c + loss_landm
         torch.cuda.synchronize()
         loss_time = time.perf_counter() - t2
 
+        # backprop
+
         t3 = time.perf_counter()
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if amp_enabled:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         torch.cuda.synchronize()
         backward_time = time.perf_counter() - t3
         batch_time = time.perf_counter() - load_t0
@@ -345,6 +355,10 @@ if __name__ == '__main__':
     cudnn.benchmark = True
 
     optimizer = optim.SGD(net.parameters(), lr=initial_lr, momentum=momentum, weight_decay=weight_decay)
+    amp_enabled = args.amp and torch.cuda.is_available()
+    scaler = GradScaler('cuda', enabled=amp_enabled)
+    if args.amp and is_main_process():
+        print('AMP training is {}.'.format('enabled' if amp_enabled else 'disabled (CUDA unavailable)'))
     criterion = MultiBoxLoss(num_classes, 0.35, True, 0, True, 7, 0.35, False)
 
     priorbox = PriorBox(cfg, image_size=(img_dim, img_dim))
