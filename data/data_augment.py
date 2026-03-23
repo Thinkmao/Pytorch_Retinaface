@@ -9,10 +9,10 @@ import albumentations as A
 from utils.box_utils import matrix_iof
 
 imgaug_operation = A.Compose([
-    # 1) 大概率灰度化，模拟IR单色成像
+    # 1) 灰度化，模拟IR单色成像
     A.OneOf([
         A.ToGray(num_output_channels=3),
-    ], p=0.7),
+    ], p=0.2),
 
     # 2) 亮度 / 对比度 / 动态范围扰动
     A.OneOf([
@@ -22,21 +22,21 @@ imgaug_operation = A.Compose([
         ),
         A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8)),
         A.RandomGamma(gamma_limit=(80, 120)),
-    ], p=0.6),
+    ], p=0),
 
     # 3) 噪声
     A.OneOf([
         A.GaussNoise(var_limit=(10.0, 50.0), mean=0, per_channel=False),
         A.MultiplicativeNoise(multiplier=(0.9, 1.1), per_channel=False),
         A.ImageCompression(quality_lower=30, quality_upper=70),
-    ], p=0.45),
+    ], p=0),
 
     # 4) 模糊 / 失焦 / 运动
     A.OneOf([
         A.MotionBlur(blur_limit=7),
         A.GaussianBlur(blur_limit=(3, 5)),
         A.MedianBlur(blur_limit=3),
-    ], p=0.35),
+    ], p=0),
 
     # 5) 遮挡增强
     A.CoarseDropout(
@@ -47,7 +47,7 @@ imgaug_operation = A.Compose([
         min_width=0.03,
         max_width=0.12,
         fill_value=0,
-        p=0.25
+        p=0
     ),
 
 ], p=1.0)
@@ -256,7 +256,9 @@ def _pad_to_square(image, rgb_mean, pad_image_flag):
     long_side = max(width, height)
     image_t = np.empty((long_side, long_side, 3), dtype=image.dtype)
     image_t[:, :] = rgb_mean
-    image_t[0:0 + height, 0:0 + width] = image
+    top = (long_side - height) // 2
+    left = (long_side - width) // 2
+    image_t[top + height, left + width] = image
     return image_t
 
 
