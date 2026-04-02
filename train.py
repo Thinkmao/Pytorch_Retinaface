@@ -20,23 +20,25 @@ from models.retinaface import RetinaFace
 parser = argparse.ArgumentParser(description='Retinaface Training')
 parser.add_argument('--training_dataset', default='./data/widerface/train/label.txt', help='Training dataset directory')
 parser.add_argument('--network', default='mobile0.25', help='Backbone network mobile0.25 or resnet50')
-parser.add_argument('--num_workers', default=24, type=int, help='Number of workers used in dataloading')
-parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='initial learning rate')
+parser.add_argument('--num_workers', default=4, type=int, help='Number of workers used in dataloading')
+parser.add_argument('--lr', '--learning-rate', default=5e-4, type=float, help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
-parser.add_argument('--resume_net', default='./weights/mobilenet0.25_Final.pth', help='resume net for retraining')
+# parser.add_argument('--resume_net', default='./weights/mobilenet0.25_Final.pth', help='resume net for retraining')
+parser.add_argument('--resume_net', default=None, help='resume net for retraining')
 parser.add_argument('--resume_epoch', default=0, type=int, help='resume iter for retraining')
 parser.add_argument('--weight_decay', default=5e-4, type=float, help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float, help='Gamma update for SGD')
-parser.add_argument('--save_folder', default='./weights/weight_grhnc3_da/', help='Location to save checkpoint models')
+parser.add_argument('--save_folder', default='./weights/weight_reproduce7/', help='Location to save checkpoint models')
 parser.add_argument('--distributed', action='store_true', help='Use DistributedDataParallel training')
 parser.add_argument('--dist_backend', default='nccl', type=str, help='Distributed backend')
 parser.add_argument('--dist_url', default='env://', type=str, help='URL used to set up distributed training')
 parser.add_argument('--rank', default=0, type=int, help='Node rank for distributed training')
 parser.add_argument('--world_size', default=1, type=int, help='Number of processes for distributed training')
 parser.add_argument('--local_rank', default=-1, type=int, help='Local rank for distributed training')
-parser.add_argument('--empty_label_ratio', default=0.0, type=float,
+parser.add_argument('--empty_label_ratio', default=0.000001, type=float,
                     help='Ratio of empty-label samples in each batch, range [0, 1). 0 means disabled.')
 parser.add_argument('--amp', action='store_true', help='Enable automatic mixed precision training on CUDA.')
+parser.add_argument('--sync_bn', action='store_true', help='Enable SyncBatchNorm for DDP training.')
 
 args = parser.parse_args()
 
@@ -67,7 +69,20 @@ class BalancedEmptyLabelBatchSampler(Sampler):
     def _split_for_rank(self, indices):
         if not self.distributed:
             return indices
-        return indices[self.rank::self.num_replicas]
+        if len(indices) == 0:
+            return []
+
+        # Match DistributedSampler semantics so every rank receives the same
+        # number of samples and therefore the same number of steps.
+        num_samples = math.ceil(len(indices) / self.num_replicas)
+        total_size = num_samples * self.num_replicas
+        if total_size > len(indices):
+            padding_size = total_size - len(indices)
+            if padding_size <= len(indices):
+                indices = indices + indices[:padding_size]
+            else:
+                indices = indices + (indices * math.ceil(padding_size / len(indices)))[:padding_size]
+        return indices[self.rank:total_size:self.num_replicas]
 
     def __iter__(self):
         generator = torch.Generator()
@@ -152,6 +167,11 @@ def is_main_process():
 def train():
     net.train()
     epoch = 0 + args.resume_epoch
+    epoch_loss_sum = 0.0
+    epoch_loss_l_sum = 0.0
+    epoch_loss_c_sum = 0.0
+    epoch_loss_landm_sum = 0.0
+    epoch_loss_count = 0
     print('Loading Dataset...')
 
     dataset = WiderFaceDetection(training_dataset,preproc(img_dim, rgb_mean))
@@ -198,9 +218,40 @@ def train():
         start_iter = 0
     epoch_t0 = time.perf_counter()
     for iteration in range(start_iter, max_iter):
-        if iteration % epoch_size == 19 and is_main_process():
-            epoch_t0 = time.perf_counter()
         if iteration % epoch_size == 0:
+            if iteration != start_iter:
+                if is_distributed:
+                    epoch_loss_stats = torch.tensor(
+                        [
+                            epoch_loss_sum,
+                            epoch_loss_l_sum,
+                            epoch_loss_c_sum,
+                            epoch_loss_landm_sum,
+                            float(epoch_loss_count)
+                        ],
+                        device=priors.device
+                    )
+                    dist.all_reduce(epoch_loss_stats, op=dist.ReduceOp.SUM)
+                    avg_epoch_loss = epoch_loss_stats[0].item() / max(epoch_loss_stats[4].item(), 1.0)
+                    avg_epoch_loss_l = epoch_loss_stats[1].item() / max(epoch_loss_stats[4].item(), 1.0)
+                    avg_epoch_loss_c = epoch_loss_stats[2].item() / max(epoch_loss_stats[4].item(), 1.0)
+                    avg_epoch_loss_landm = epoch_loss_stats[3].item() / max(epoch_loss_stats[4].item(), 1.0)
+                else:
+                    avg_epoch_loss = epoch_loss_sum / max(epoch_loss_count, 1)
+                    avg_epoch_loss_l = epoch_loss_l_sum / max(epoch_loss_count, 1)
+                    avg_epoch_loss_c = epoch_loss_c_sum / max(epoch_loss_count, 1)
+                    avg_epoch_loss_landm = epoch_loss_landm_sum / max(epoch_loss_count, 1)
+
+                if is_main_process():
+                    print('Epoch {} Average Loss: total {:.6f} || Loc {:.6f} Cla {:.6f} Landm {:.6f}'.format(
+                        epoch, avg_epoch_loss, avg_epoch_loss_l, avg_epoch_loss_c, avg_epoch_loss_landm))
+
+                epoch_loss_sum = 0.0
+                epoch_loss_l_sum = 0.0
+                epoch_loss_c_sum = 0.0
+                epoch_loss_landm_sum = 0.0
+                epoch_loss_count = 0
+
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
             if batch_sampler is not None and hasattr(batch_sampler, 'set_epoch'):
@@ -210,10 +261,11 @@ def train():
             batch_iterator = iter(dataloader)
             # if (epoch % 10 == 0 and epoch > 0) or (epoch % 5 == 0 and epoch > cfg['decay1']):
             if is_main_process():
-                epoch_t1 = time.perf_counter()
-                epoch_time = epoch_t1 - epoch_t0
                 state_dict = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
                 torch.save(state_dict, save_folder + cfg['name'] + '_epoch_' + str(epoch) + '.pth')
+                torch.cuda.synchronize()
+                epoch_time = time.perf_counter() - epoch_t0
+                epoch_t0 = time.perf_counter()
                 print('Epoch {}  Time {:.3f}'.format(epoch, epoch_time))
             epoch += 1
 
@@ -225,7 +277,7 @@ def train():
         lr = adjust_learning_rate(optimizer, gamma, epoch, step_index, iteration, epoch_size)
 
         # load train data
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         images, targets = next(batch_iterator)
         if is_distributed:
             images = images.cuda(args.local_rank, non_blocking=True)
@@ -233,27 +285,28 @@ def train():
         else:
             images = images.cuda(non_blocking=True)
             targets = [anno.cuda(non_blocking=True) for anno in targets]
-        torch.cuda.synchronize()
-        data_time = time.perf_counter() - t0
+        # torch.cuda.synchronize()
+        # data_time = time.perf_counter() - t0
 
         # forward
         t1 = time.perf_counter()
         with autocast(device_type='cuda', enabled=amp_enabled):
             out = net(images)
-        torch.cuda.synchronize()
-        forward_time = time.perf_counter() - t1
+        # torch.cuda.synchronize()
+        # forward_time = time.perf_counter() - t1
 
         # loss
         t2 = time.perf_counter()
         with autocast(device_type='cuda', enabled=amp_enabled):
             loss_l, loss_c, loss_landm = criterion(out, priors, targets)
-            loss = cfg['loc_weight'] * loss_l + loss_c + loss_landm
-        torch.cuda.synchronize()
-        loss_time = time.perf_counter() - t2
+            loss = cfg['loc_weight'] * loss_l +  loss_c + loss_landm
+            # loss = 1 * loss_l + 1.5 * loss_c + loss_landm
+        # torch.cuda.synchronize()
+        # loss_time = time.perf_counter() - t2
 
         # backprop
 
-        t3 = time.perf_counter()
+        # t3 = time.perf_counter()
         optimizer.zero_grad()
         if amp_enabled:
             scaler.scale(loss).backward()
@@ -262,15 +315,49 @@ def train():
         else:
             loss.backward()
             optimizer.step()
-        torch.cuda.synchronize()
-        backward_time = time.perf_counter() - t3
+
+        epoch_loss_sum += loss.detach().item()
+        epoch_loss_l_sum += loss_l.detach().item()
+        epoch_loss_c_sum += loss_c.detach().item()
+        epoch_loss_landm_sum += loss_landm.detach().item()
+        epoch_loss_count += 1
+        # torch.cuda.synchronize()
+        # backward_time = time.perf_counter() - t3
         batch_time = time.perf_counter() - load_t0
         eta = int(batch_time * (max_iter - iteration))
 
         if iteration % 20 == 0 and is_main_process():
-            print('Epoch:{}/{} || Epochiter: {}/{} || Iter: {}/{} || Loc: {:.4f} Cla: {:.4f} Landm: {:.4f} || LR: {:.8f} || Datatime: {:.4f} s ||forwardtime: {:.4f} s ||losstime: {:.4f} s ||backwardtime: {:.4f} s ||Batchtime: {:.4f} s || ETA: {}'
-                .format(epoch, max_epoch, (iteration % epoch_size) + 1,
-                epoch_size, iteration + 1, max_iter, loss_l.item(), loss_c.item(), loss_landm.item(), lr, data_time, forward_time, loss_time, backward_time, batch_time, str(datetime.timedelta(seconds=eta))))
+            # print('Epoch:{}/{} || Epochiter: {}/{} || Iter: {}/{} || Loc: {:.4f} Cla: {:.4f} Landm: {:.4f} || LR: {:.8f} || Datatime: {:.4f} s ||forwardtime: {:.4f} s ||losstime: {:.4f} s ||backwardtime: {:.4f} s ||Batchtime: {:.4f} s || ETA: {}'
+            #     .format(epoch, max_epoch, (iteration % epoch_size) + 1, epoch_size, iteration + 1, max_iter, loss_l.item(), loss_c.item(), loss_landm.item(), lr, data_time, forward_time, loss_time, backward_time, batch_time, str(datetime.timedelta(seconds=eta))))
+            print('Epoch:{}/{} || Epochiter: {}/{} || Iter: {}/{} || Loc: {:.4f} Cla: {:.4f} Landm: {:.4f} || LR: {:.8f} || Batchtime: {:.4f} s || ETA: {}'
+                .format(epoch, max_epoch, (iteration % epoch_size) + 1, epoch_size, iteration + 1, max_iter, loss_l.item(), loss_c.item(), loss_landm.item(), lr, batch_time, str(datetime.timedelta(seconds=eta))))
+    if epoch_loss_count > 0:
+        if is_distributed:
+            epoch_loss_stats = torch.tensor(
+                [
+                    epoch_loss_sum,
+                    epoch_loss_l_sum,
+                    epoch_loss_c_sum,
+                    epoch_loss_landm_sum,
+                    float(epoch_loss_count)
+                ],
+                device=priors.device
+            )
+            dist.all_reduce(epoch_loss_stats, op=dist.ReduceOp.SUM)
+            avg_epoch_loss = epoch_loss_stats[0].item() / max(epoch_loss_stats[4].item(), 1.0)
+            avg_epoch_loss_l = epoch_loss_stats[1].item() / max(epoch_loss_stats[4].item(), 1.0)
+            avg_epoch_loss_c = epoch_loss_stats[2].item() / max(epoch_loss_stats[4].item(), 1.0)
+            avg_epoch_loss_landm = epoch_loss_stats[3].item() / max(epoch_loss_stats[4].item(), 1.0)
+        else:
+            avg_epoch_loss = epoch_loss_sum / max(epoch_loss_count, 1)
+            avg_epoch_loss_l = epoch_loss_l_sum / max(epoch_loss_count, 1)
+            avg_epoch_loss_c = epoch_loss_c_sum / max(epoch_loss_count, 1)
+            avg_epoch_loss_landm = epoch_loss_landm_sum / max(epoch_loss_count, 1)
+
+        if is_main_process():
+            print('Epoch {} Average Loss: total {:.6f} || Loc {:.6f} Cla {:.6f} Landm {:.6f}'.format(
+                epoch, avg_epoch_loss, avg_epoch_loss_l, avg_epoch_loss_c, avg_epoch_loss_landm))
+
     if is_main_process():
         state_dict = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
         torch.save(state_dict, save_folder + cfg['name'] + '_Final.pth')
@@ -282,7 +369,7 @@ def adjust_learning_rate(optimizer, gamma, epoch, step_index, iteration, epoch_s
     # Adapted from PyTorch Imagenet example:
     # https://github.com/pytorch/examples/blob/master/imagenet/main.py
     """
-    warmup_epoch = -1
+    warmup_epoch = 0
     if epoch <= warmup_epoch:
         lr = 1e-6 + (initial_lr-1e-6) * iteration / (epoch_size * warmup_epoch)
     else:
@@ -345,6 +432,8 @@ if __name__ == '__main__':
             raise ValueError('For distributed training, cfg[\'batch_size\'] must be divisible by world_size.')
         batch_size = batch_size // num_gpu
         net = net.cuda(args.local_rank)
+        if args.sync_bn:
+            net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
         net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank],
                                                         output_device=args.local_rank)
     elif num_gpu > 1 and gpu_train:
@@ -359,6 +448,8 @@ if __name__ == '__main__':
     scaler = GradScaler('cuda', enabled=amp_enabled)
     if args.amp and is_main_process():
         print('AMP training is {}.'.format('enabled' if amp_enabled else 'disabled (CUDA unavailable)'))
+    if args.sync_bn and is_main_process():
+        print('SyncBatchNorm is {}.'.format('enabled for DDP' if is_distributed else 'requested but ignored (DDP disabled)'))
     criterion = MultiBoxLoss(num_classes, 0.35, True, 0, True, 7, 0.35, False)
 
     priorbox = PriorBox(cfg, image_size=(img_dim, img_dim))

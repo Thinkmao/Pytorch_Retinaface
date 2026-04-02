@@ -8,7 +8,7 @@ cfg_mnet = {
     'clip': False,
     'loc_weight': 2.0,
     'gpu_train': True,
-    'batch_size': 128,
+    'batch_size': 16,
     'ngpu': 8,
     'epoch': 250,
     'decay1': 190,

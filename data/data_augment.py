@@ -12,7 +12,7 @@ imgaug_operation = A.Compose([
     # 1) 灰度化，模拟IR单色成像
     A.OneOf([
         A.ToGray(num_output_channels=3),
-    ], p=0.2),
+    ], p=0),
 
     # 2) 亮度 / 对比度 / 动态范围扰动
     A.OneOf([
@@ -251,15 +251,15 @@ def _mirror(image, boxes, landms):
 
 def _pad_to_square(image, rgb_mean, pad_image_flag):
     if not pad_image_flag:
-        return image
+        return image, 0, 0
     height, width, _ = image.shape
     long_side = max(width, height)
     image_t = np.empty((long_side, long_side, 3), dtype=image.dtype)
     image_t[:, :] = rgb_mean
     top = (long_side - height) // 2
     left = (long_side - width) // 2
-    image_t[top + height, left + width] = image
-    return image_t
+    image_t[top:top + height, left:left + width] = image
+    return image_t, left, top
 
 
 def _resize_subtract_mean(image, insize, rgb_mean):
@@ -280,7 +280,7 @@ class preproc(object):
     def __call__(self, image, targets):
         if targets.shape[0] == 0:
             image_t = _distort(image)
-            image_t = _pad_to_square(image_t, self.rgb_means, True)
+            image_t, _, _ = _pad_to_square(image_t, self.rgb_means, True)
             image_t = _resize_subtract_mean(image_t, self.img_dim, self.rgb_means)
             return image_t, targets
 
@@ -291,7 +291,12 @@ class preproc(object):
         image_t, boxes_t, labels_t, landm_t, pad_image_flag = _crop(image, boxes, labels, landm, self.img_dim)
         image_t = imgaug_operation(image=image_t)["image"]
         image_t = _distort(image_t)
-        image_t = _pad_to_square(image_t,self.rgb_means, pad_image_flag)
+        image_t, pad_left, pad_top = _pad_to_square(image_t, self.rgb_means, pad_image_flag)
+        if pad_image_flag:
+            boxes_t[:, 0::2] += pad_left
+            boxes_t[:, 1::2] += pad_top
+            landm_t[:, 0::2] += pad_left
+            landm_t[:, 1::2] += pad_top
         image_t, boxes_t, landm_t = _mirror(image_t, boxes_t, landm_t)
         height, width, _ = image_t.shape
         image_t = _resize_subtract_mean(image_t, self.img_dim, self.rgb_means)
