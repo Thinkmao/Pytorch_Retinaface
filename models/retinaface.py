@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from collections import OrderedDict
 
 from models.net import MobileNetV1 as MobileNetV1
+from models.net import MobileNetV3Small035 as MobileNetV3Small035
 from models.net import FPN as FPN
 from models.net import SSH as SSH
 
@@ -70,6 +71,10 @@ class RetinaFace(nn.Module):
         elif cfg['name'] == 'Resnet50':
             import torchvision.models as models
             backbone = models.resnet50(pretrained=cfg['pretrain'])
+        elif cfg['name'] == 'mobilenetv3small0.35':
+            backbone = MobileNetV3Small035()
+        else:
+            raise ValueError('Unsupported backbone: {}'.format(cfg['name']))
 
         self.body = _utils.IntermediateLayerGetter(backbone, cfg['return_layers'])
         in_channels_stage2 = cfg['in_channel']
