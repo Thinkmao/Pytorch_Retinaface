@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
             "  --hf_dataset_id username/PASS --hf_split train --hf_streaming\n"
         ),
     )
-    parser.add_argument("--trained_model", default='./weights/mobilenet0.25_Final.pth', type=str,
+    parser.add_argument("--trained_model", default='./weights/weight_reproduce3/mobilenet0.25_Final.pth', type=str,
                         help="Path to RetinaFace weights.")
     parser.add_argument("--network", default="mobile0.25", choices=["mobile0.25", "resnet50"], help="Backbone type.")
     parser.add_argument("--cpu", action="store_true", default=False, help="Force CPU inference.")
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional inference input size, e.g. 320x320. Empty means using original image size.",
     )
 
-    parser.add_argument("--input_dir", default="E:/wan/DataSet/PASS/PASS_dataset", type=str, help="Local image directory.")
+    parser.add_argument("--input_dir", default="E:\wan\DataSet/test0303_gray", type=str, help="Local image directory.")
     parser.add_argument("--hf_dataset_id", default='yukimasano/pass', type=str,
                         help="Hugging Face dataset id, e.g. org/pass.")
     parser.add_argument("--hf_config", default=None, type=str, help="Optional Hugging Face dataset config/subset name.")
@@ -62,13 +62,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--output_label",
-        default="./negative_mining/2/negative_mining_labels.txt",
+        default="./negative_mining/5/negative_mining_labels.txt",
         type=str,
         help="Output label file path in WIDERFace label.txt format.",
     )
     parser.add_argument(
         "--output_face_images",
-        default="./negative_mining/2",
+        default="./negative_mining/reproduce3",
         type=str,
         help="Directory to save original images that contain detected faces.",
     )
@@ -317,8 +317,8 @@ def run_mining(
             h, w = img_for_pipeline.shape[:2]
             fw.write(f"#{rel_name}\n")
             # fw.write(f"{len(dets)}\n")
-            # for b in dets:
-            #     fw.write(to_label_line(b, w, h) + "\n")
+            for b in dets:
+                fw.write(to_label_line(b, w, h) + "\n")
 
             dst_path = out_img_dir / rel_name
             dst_path.parent.mkdir(parents=True, exist_ok=True)
