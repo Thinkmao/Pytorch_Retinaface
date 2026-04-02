@@ -9,7 +9,7 @@ import argparse
 import torch.utils.data as data
 from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
-from data import WiderFaceDetection, detection_collate, preproc, cfg_mnet, cfg_re50
+from data import WiderFaceDetection, detection_collate, preproc, cfg_mnet, cfg_re50, cfg_mnetv3_small_035
 from layers.modules import MultiBoxLoss
 from layers.functions.prior_box import PriorBox
 import time
@@ -19,7 +19,9 @@ from models.retinaface import RetinaFace
 
 parser = argparse.ArgumentParser(description='Retinaface Training')
 parser.add_argument('--training_dataset', default='./data/widerface/train/label.txt', help='Training dataset directory')
-parser.add_argument('--network', default='mobile0.25', help='Backbone network mobile0.25 or resnet50')
+parser.add_argument('--network', default='mobile0.25',
+                    choices=['mobile0.25', 'resnet50', 'mobilenetv3small0.35'],
+                    help='Backbone network: mobile0.25, resnet50, or mobilenetv3small0.35')
 parser.add_argument('--num_workers', default=24, type=int, help='Number of workers used in dataloading')
 parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
@@ -301,6 +303,8 @@ if __name__ == '__main__':
         cfg = cfg_mnet
     elif args.network == "resnet50":
         cfg = cfg_re50
+    elif args.network == "mobilenetv3small0.35":
+        cfg = cfg_mnetv3_small_035
 
     rgb_mean = (104, 117, 123)  # bgr order
     num_classes = 2

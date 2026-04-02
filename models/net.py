@@ -135,3 +135,17 @@ class MobileNetV1(nn.Module):
         x = self.fc(x)
         return x
 
+
+class MobileNetV3Small035(nn.Module):
+    def __init__(self):
+        super(MobileNetV3Small035, self).__init__()
+        backbone = models.mobilenet_v3_small(weights=None, width_mult=0.35).features
+        self.stage1 = nn.Sequential(*backbone[:3])
+        self.stage2 = nn.Sequential(*backbone[3:5])
+        self.stage3 = nn.Sequential(*backbone[5:10])
+
+    def forward(self, x):
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        return x

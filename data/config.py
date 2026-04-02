@@ -40,3 +40,22 @@ cfg_re50 = {
     'out_channel': 256
 }
 
+cfg_mnetv3_small_035 = {
+    'name': 'mobilenetv3small0.35',
+    'min_sizes': [[16, 32], [64, 128], [256, 512]],
+    'steps': [8, 16, 32],
+    'variance': [0.1, 0.2],
+    'clip': False,
+    'loc_weight': 2.0,
+    'gpu_train': True,
+    'batch_size': 96,
+    'ngpu': 8,
+    'epoch': 250,
+    'decay1': 190,
+    'decay2': 220,
+    'image_size': 640,
+    'pretrain': False,
+    'return_layers': {'stage1': 1, 'stage2': 2, 'stage3': 3},
+    'in_channel': 4,
+    'out_channel': 64
+}
